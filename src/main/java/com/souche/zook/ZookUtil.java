@@ -20,40 +20,38 @@ import java.util.concurrent.SynchronousQueue;
  */
 public class ZookUtil {
 
-    private static final String ZOOKEEPER_ADDRESS = "127.0.0.1:2181";   //zookeeper服务器地址
+    private static final String ZOOKEEPER_ADDRESS = ConfigUtil.getVal("address");   //zookeeper服务器地址
 
-    private static final String PROPERTIES_PATH = "/props";   //配置文件在zookeeper上的节点名
+    private static final String PROPERTIES_PATH = ConfigUtil.getVal("properties_path");   //配置文件在zookeeper上的节点名
 
-    private static final String CLUSTER_PATH = "/testCluster";
+    private static final String CLUSTER_PATH = ConfigUtil.getVal("cluster_path");  //集群的父目录节点
 
-    private static final String LOCK_PATH = "/testLock";
+    private static final String LOCK_PATH = ConfigUtil.getVal("lock_path");  //锁节点的父目录节点
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ZookUtil.class);
 
-    private static final String fileName = "demo.properties";   //需要动态配置的配置文件
+    private static final String FILENAME = "demo.properties";   //需要动态配置的配置文件
 
     private static final SynchronousQueue<Integer> lock_queue = new SynchronousQueue<Integer>();
 
     public static ZooKeeper getZookeeperClient() throws IOException {
         LOGGER.info("init zookeeper client...");
-        ZooKeeper zooKeeper = new ZooKeeper(ZOOKEEPER_ADDRESS, 10000, new Watcher() {
+        return new ZooKeeper(ZOOKEEPER_ADDRESS, 10000, new Watcher() {
             public void process(WatchedEvent watchedEvent) {
                 if (watchedEvent.getType() != Event.EventType.None) {
                     LOGGER.info("{}触发了{}事件!", watchedEvent.getPath(), watchedEvent.getType());
                 }
             }
         });
-        return zooKeeper;
     }
 
     public static ZooKeeper getZookeeperClient(Watcher watcher) throws IOException {
         LOGGER.info("init zookeeper client by watcher...");
-        ZooKeeper zooKeeper = new ZooKeeper(ZOOKEEPER_ADDRESS, 10000, watcher);
-        return zooKeeper;
+        return new ZooKeeper(ZOOKEEPER_ADDRESS, 10000, watcher);
     }
 
     public static String getFilePath() {
-        return System.getProperty("user.dir") + "/src/main/resources/" + fileName;
+        return System.getProperty("user.dir") + "/src/main/resources/" + FILENAME;
 
     }
 
@@ -70,6 +68,7 @@ public class ZookUtil {
             LOGGER.error(e.getMessage());
         } catch (InterruptedException e) {
             LOGGER.error(e.getMessage());
+            Thread.currentThread().interrupt();
         } catch (KeeperException e) {
             LOGGER.error(e.getMessage());
         }
@@ -86,9 +85,9 @@ public class ZookUtil {
             byte[] data = zk.getData(PROPERTIES_PATH, false, null);
             String jsonStr = new String(data);
             Map<String, String> map = JSON.parseObject(jsonStr, Map.class);
-            StringBuffer sb = new StringBuffer();
-            for (String key : map.keySet()) {
-                sb.append(key + "=" + map.get(key)).append("\n");
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<String,String> entry : map.entrySet()) {
+                sb.append(entry.getKey() + "=" + entry.getValue()).append("\n");
             }
             fileWriter = new FileWriter(getFilePath());
             fileWriter.write(sb.toString());
@@ -96,11 +95,14 @@ public class ZookUtil {
             LOGGER.error(e.getMessage());
         } catch (InterruptedException e) {
             LOGGER.error(e.getMessage());
+            Thread.currentThread().interrupt();
         } catch (KeeperException e) {
             LOGGER.error(e.getMessage());
         } finally {
             try {
-                fileWriter.close();
+                if(fileWriter != null) {
+                    fileWriter.close();
+                }
             } catch (IOException e) {
                 LOGGER.error(e.getMessage());
             }
@@ -123,6 +125,7 @@ public class ZookUtil {
                             queue.put(1);
                         } catch (InterruptedException e) {
                             LOGGER.error(e.getMessage());
+                            Thread.currentThread().interrupt();
                         }
                     }
                 }
@@ -139,6 +142,7 @@ public class ZookUtil {
             LOGGER.error(e.getMessage());
         } catch (InterruptedException e) {
             LOGGER.error(e.getMessage());
+            Thread.currentThread().interrupt();
         } catch (KeeperException e) {
             LOGGER.error(e.getMessage());
         }
@@ -161,6 +165,7 @@ public class ZookUtil {
                             queue.put(1);
                         } catch (InterruptedException e) {
                             LOGGER.error(e.getMessage());
+                            Thread.currentThread().interrupt();
                         }
                     }
                 }
@@ -172,6 +177,7 @@ public class ZookUtil {
             LOGGER.error(e.getMessage());
         } catch (InterruptedException e) {
             LOGGER.error(e.getMessage());
+            Thread.currentThread().interrupt();
         } catch (KeeperException e) {
             LOGGER.error(e.getMessage());
         }
@@ -189,7 +195,7 @@ public class ZookUtil {
                     ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);  //创建锁节点
 
             List<String> list = zk.getChildren(LOCK_PATH, false);
-            String nodes[] = list.toArray(new String[list.size()]);
+            String []nodes = list.toArray(new String[list.size()]);
             Arrays.sort(nodes);
             if (newNode.equals(LOCK_PATH + "/" + nodes[0])) {  //与zk中最小的锁节点比较，相同则获取锁成功
                 LOGGER.info("获取锁成功");
@@ -203,11 +209,12 @@ public class ZookUtil {
                 simulateLock();  //尝试重新获取锁
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            LOGGER.error(e.getMessage());
+        }  catch (KeeperException e) {
+            LOGGER.error(e.getMessage());
         } catch (InterruptedException e) {
-            e.printStackTrace();
-        } catch (KeeperException e) {
-            e.printStackTrace();
+            LOGGER.error(e.getMessage());
+            Thread.currentThread().interrupt();
         }
     }
 
