@@ -107,13 +107,13 @@ public class ZookeeperUtilsTest {
     @Test
     public void testLock(){
         final ZookUtil zookUtil = new ZookUtil();
-        new Thread(new Runnable() {
+        new Thread(new Runnable() {    //开启一个获取锁的线程
             public void run() {
                 zookUtil.simulateLock();
             }
         }).start();
 
-        new Thread(new Runnable() {
+        new Thread(new Runnable() {    //开启一个获取锁的线程
             public void run() {
                 zookUtil.simulateLock();
             }
