@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.SynchronousQueue;
 
 
@@ -28,11 +29,17 @@ public class ZookUtil {
 
     private static final String LOCK_PATH = ConfigUtil.getVal("lock_path");  //锁节点的父目录节点
 
+    private static final String QUEUE_PATH = ConfigUtil.getVal("queue_path");  //队列的父目录节点
+
     private static final Logger LOGGER = LoggerFactory.getLogger(ZookUtil.class);
 
     private static final String FILENAME = "demo.properties";   //需要动态配置的配置文件
 
-    private static final SynchronousQueue<Integer> lock_queue = new SynchronousQueue<Integer>();
+    private static final int queueSize = 10;
+
+    private static final SynchronousQueue<Integer> lock_wait = new SynchronousQueue<Integer>();
+
+    private static final SynchronousQueue<Integer> queue_wait = new SynchronousQueue<Integer>();
 
     public static ZooKeeper getZookeeperClient() throws IOException {
         LOGGER.info("init zookeeper client...");
@@ -50,6 +57,70 @@ public class ZookUtil {
         return new ZooKeeper(ZOOKEEPER_ADDRESS, 10000, watcher);
     }
 
+    //用于分布式队列的watcher
+    public class QueueWatcher implements Watcher {
+
+        CountDownLatch latch;
+
+        public QueueWatcher() {
+            latch = new CountDownLatch(1);
+        }
+
+        public void process(WatchedEvent watchedEvent) {
+            if (watchedEvent.getType() == Event.EventType.NodeChildrenChanged) {
+                LOGGER.info("队列成员发生变更...");
+                latch.countDown();
+            }
+        }
+
+        public void await() throws InterruptedException {
+            latch.await();
+        }
+    }
+
+    //用于集群管理的watcher
+    public class ClusterWatcher implements Watcher {
+
+        ZooKeeper zooKeeper;
+        SynchronousQueue<Integer> lock = new SynchronousQueue<Integer>();
+
+        public ClusterWatcher() {
+            try {
+                zooKeeper = getZookeeperClient();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+        public void process(WatchedEvent watchedEvent) {
+            if (watchedEvent.getType() == Event.EventType.NodeChildrenChanged) {
+                try {
+                    lock.put(1);
+                    synchronized (zooKeeper) {
+                        int chidren_actual = zooKeeper.getChildren(CLUSTER_PATH, false).size();
+                        int children_before = Integer.valueOf(new String(zooKeeper.getData(
+                                CLUSTER_PATH, false, null)));
+                        zooKeeper.setData(CLUSTER_PATH, String.valueOf(chidren_actual).getBytes(), -1);
+                        if (chidren_actual > children_before) {
+                            LOGGER.info("集群中有新服务上线...");
+                        } else {
+                            LOGGER.info("集群中有服务下线...");
+                        }
+                    }
+                } catch (KeeperException e) {
+                    e.printStackTrace();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+
+        public void await() throws InterruptedException {
+            lock.take();
+        }
+    }
+
+    //获取应用内配置文件的路径
     public static String getFilePath() {
         return System.getProperty("user.dir") + "/src/main/resources/" + FILENAME;
 
@@ -86,7 +157,7 @@ public class ZookUtil {
             String jsonStr = new String(data);
             Map<String, String> map = JSON.parseObject(jsonStr, Map.class);
             StringBuilder sb = new StringBuilder();
-            for (Map.Entry<String,String> entry : map.entrySet()) {
+            for (Map.Entry<String, String> entry : map.entrySet()) {
                 sb.append(entry.getKey() + "=" + entry.getValue()).append("\n");
             }
             fileWriter = new FileWriter(getFilePath());
@@ -100,7 +171,7 @@ public class ZookUtil {
             LOGGER.error(e.getMessage());
         } finally {
             try {
-                if(fileWriter != null) {
+                if (fileWriter != null) {
                     fileWriter.close();
                 }
             } catch (IOException e) {
@@ -157,21 +228,12 @@ public class ZookUtil {
         LOGGER.info("模拟集群已初始化完毕，持续监听注册的客户端状态...");
         final SynchronousQueue<Integer> queue = new SynchronousQueue<Integer>();
         try {
-            ZooKeeper zk = getZookeeperClient(new Watcher() {
-                public void process(WatchedEvent watchedEvent) {
-                    if (watchedEvent.getType() == Event.EventType.NodeChildrenChanged) {
-                        LOGGER.info("注册到zk上的服务器集群有变化");
-                        try {
-                            queue.put(1);
-                        } catch (InterruptedException e) {
-                            LOGGER.error(e.getMessage());
-                            Thread.currentThread().interrupt();
-                        }
-                    }
-                }
-            });
-            while (zk.getChildren("/testCluster", true) != null) {
-                queue.take();
+            ClusterWatcher clusterWatcher = new ClusterWatcher();
+            ZooKeeper zk = getZookeeperClient(clusterWatcher);
+            int serverCounts = zk.getChildren(CLUSTER_PATH, false).size();
+            zk.setData(CLUSTER_PATH, String.valueOf(serverCounts).getBytes(), -1);
+            while (zk.getChildren(CLUSTER_PATH, true) != null) {
+                clusterWatcher.await();
             }
         } catch (IOException e) {
             LOGGER.error(e.getMessage());
@@ -195,22 +257,22 @@ public class ZookUtil {
                     ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);  //创建锁节点
 
             List<String> list = zk.getChildren(LOCK_PATH, false);
-            String []nodes = list.toArray(new String[list.size()]);
+            String[] nodes = list.toArray(new String[list.size()]);
             Arrays.sort(nodes);
             if (newNode.equals(LOCK_PATH + "/" + nodes[0])) {  //与zk中最小的锁节点比较，相同则获取锁成功
                 LOGGER.info("获取锁成功");
                 Thread.sleep(5000);
                 zk.close();    //由于创建的锁节点是临时节点，所以客户端退出即删除相应节点
-                lock_queue.put(1);
+                lock_wait.put(1);
             } else {
                 LOGGER.info("获取锁失败，持续等待");
-                lock_queue.take();
+                lock_wait.take();
                 zk.close();   //退出客户端以删除获取锁失败时创建的节点
                 simulateLock();  //尝试重新获取锁
             }
         } catch (IOException e) {
             LOGGER.error(e.getMessage());
-        }  catch (KeeperException e) {
+        } catch (KeeperException e) {
             LOGGER.error(e.getMessage());
         } catch (InterruptedException e) {
             LOGGER.error(e.getMessage());
@@ -218,4 +280,63 @@ public class ZookUtil {
         }
     }
 
+
+    //zookeeper实现阻塞队列的生产者
+    public void simulateProducer() {
+
+        initPath(QUEUE_PATH);
+        try {
+            ZooKeeper zk = getZookeeperClient();
+            while (zk.exists(QUEUE_PATH, false) != null) {
+                QueueWatcher watcher = new QueueWatcher();
+                if (zk.getChildren(QUEUE_PATH, watcher).size() >= queueSize) {
+                    LOGGER.info("由于队列已满，进入阻塞状态...");
+                    watcher.await();
+                }
+                zk.create(QUEUE_PATH + "/elem-", String.valueOf(System.currentTimeMillis()).getBytes(),
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
+            }
+        } catch (IOException e) {
+            LOGGER.error(e.getMessage());
+        } catch (InterruptedException e) {
+            LOGGER.error(e.getMessage());
+        } catch (KeeperException e) {
+            LOGGER.error(e.getMessage());
+        }
+
+    }
+
+    //zookeeper实现阻塞队列的消费者
+    public void simulateCustomer() {
+
+        initPath(QUEUE_PATH);
+        try {
+            ZooKeeper zk = getZookeeperClient();
+            while (zk.exists(QUEUE_PATH, false) != null) {
+                QueueWatcher watcher = new QueueWatcher();
+                List<String> nodes = zk.getChildren(QUEUE_PATH, watcher);
+                if (nodes.isEmpty()) {
+                    LOGGER.info("由于队列已空，消费者线程进入阻塞状态...");
+                    watcher.await();
+                    continue;
+                } else {
+                    String[] products = nodes.toArray(new String[nodes.size()]);
+                    Arrays.sort(products);
+                    String path = QUEUE_PATH + "/" + products[0];
+                    LOGGER.info("模拟处理队列{}中的{}元素对应的数据", QUEUE_PATH, path);
+                    Thread.sleep(5000);
+                    zk.delete(path, -1);
+                    LOGGER.info("处理完后从队列{}移除元素{}", QUEUE_PATH, path);
+                }
+
+            }
+        } catch (IOException e) {
+            LOGGER.error(e.getMessage());
+        } catch (InterruptedException e) {
+            LOGGER.error(e.getMessage());
+        } catch (KeeperException e) {
+            LOGGER.error(e.getMessage());
+        }
+
+    }
 }

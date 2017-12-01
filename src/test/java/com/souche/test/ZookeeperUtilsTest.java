@@ -5,9 +5,11 @@ import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooKeeper;
+import org.junit.Assert;
 import org.junit.Test;
 
 import java.io.IOException;
+import java.util.List;
 
 /**
  * Created by zhengcong on 2017/9/27.
@@ -40,8 +42,8 @@ public class ZookeeperUtilsTest {
             }
         }).start();
         try {
-            Thread.sleep(15000);   //阻塞一段时间确保在同步完成之后再退出主程序
-        } catch (InterruptedException e) {
+            System.in.read();
+        } catch (IOException e) {
             e.printStackTrace();
         }
 
@@ -124,6 +126,22 @@ public class ZookeeperUtilsTest {
         } catch (IOException e) {
             e.printStackTrace();
         }
+    }
+
+    @Test
+    public void testDistributedBlockingQueue(){
+        ZookUtil zookUtil = new ZookUtil();
+        zookUtil.simulateProducer();   //开启producer线程
+        zookUtil.simulateCustomer();   //开启customer线程
+    }
+
+    @Test
+    public void test() throws IOException, KeeperException, InterruptedException {
+
+        ZooKeeper zooKeeper = ZookUtil.getZookeeperClient();
+        List<String> cildren = zooKeeper.getChildren("/ttt",false);
+        Assert.assertEquals(cildren.size(),0);
+
     }
 
 }
